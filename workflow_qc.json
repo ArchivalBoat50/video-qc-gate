@@ -1,0 +1,782 @@
+{
+  "id": "videoQC0001",
+  "name": "Video QC Loop (stock + reel)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "trig",
+      "name": "Every hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -420,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "manual",
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -420,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\n// Both runners read the SAME rubric + context pack from /scripts so the n8n\n// chain and pipeline_qc.py cannot drift apart. context/ is NOT mounted into\n// the container, which is why the doctrine + brand docs are shipped as\n// context_pack.txt under scripts/ instead.\nconst pack   = fs.existsSync('/scripts/context_pack.txt')\n  ? fs.readFileSync('/scripts/context_pack.txt','utf8') + '\\n\\n' : '';\nconst rubric = pack + fs.readFileSync('/scripts/rubric_stock.txt','utf8');\n// Reference still of the persona, sent BEFORE the contact sheet. Without it\n// a clip that is internally consistent but simply the wrong woman passes.\nconst reference_b64 = fs.readFileSync('/scripts/reference.jpg').toString('base64');\nreturn [{ json: { rubric, reference_b64 } }];"
+      },
+      "id": "rub-stock",
+      "name": "Load rubric (stock)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "PIPE_DATA=/data/stock PIPE_STAGE=stock python3 /scripts/scan.py --stage stock",
+        "executeOnce": true
+      },
+      "id": "scan-stock",
+      "name": "ffmpeg pre-QC (stock)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.stdout || '[]';\nlet clips = [];\ntry { clips = JSON.parse(raw); } catch (e) { throw new Error('scan.py did not return JSON: ' + raw.slice(0,300)); }\nif (!clips.length) return [];\n\n// Everything below is interpolated into a shell command by the move nodes, and\n// the model controls part of it (defects/note). Strip shell metacharacters and\n// newlines so a reply like '\"; rm -rf /data; #' cannot execute. Also caps the\n// length so one rambling note cannot blow out the command line.\nconst shellSafe = (s) => String(s == null ? '' : s)\n  .replace(/[\\r\\n\\t]+/g, ' ')\n  .replace(/[\"'`$\\\\;&|<>]/g, '')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, 200) || 'no detail';\n\nreturn clips.map(c => ({ json: {\n  ...c,\n  safe_reason: shellSafe((c.hard_fail_reasons || []).join('; ')),\n} }));"
+      },
+      "id": "split-stock",
+      "name": "One item per clip (stock)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hard_fail }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ifhard-stock",
+      "name": "Hard fail? (stock)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=PIPE_DATA=/data/stock sh /scripts/move.sh \"{{ $json.path }}\" rejected \"{{ $json.safe_reason }}\"",
+        "executeOnce": false
+      },
+      "id": "rej1-stock",
+      "name": "Reject (objective) (stock)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        640,
+        160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [ { parts: [{ text: $('Load rubric (stock)').first().json.rubric }].concat($('Load rubric (stock)').first().json.reference_b64 ? [{ text: 'REFERENCE IMAGE (the persona):' },{ inline_data: { mime_type: 'image/jpeg', data: $('Load rubric (stock)').first().json.reference_b64 } }] : []).concat([{ text: 'CONTACT SHEET (the clip under review):' },{ inline_data: { mime_type: 'image/jpeg', data: $json.sheet_b64 } }]) } ], generationConfig: { temperature: 0, responseMimeType: 'application/json' } }) }}",
+        "options": {
+          "timeout": 120000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 5000
+            }
+          }
+        }
+      },
+      "id": "gem-stock",
+      "name": "Gemini QC (stock)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        440
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 10000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Runs once per item. Must stay in runOnceForEachItem mode: this body uses\n// $json and $('Hard fail? (stock)').item, which are single-item constructs. In the\n// default run-once-for-all-items mode it silently collapsed N Gemini replies\n// into 1 and dropped every clip after the first.\nconst clip = $('Hard fail? (stock)').item.json;\nlet verdict = { verdict: 'review', confidence: 0, defects: [], note: 'unparseable model reply' };\n\n// The Gemini node continues on error so one bad clip cannot strand the batch.\n// A failed call arrives here as an error item; route it to review rather than\n// silently rejecting a clip nobody actually looked at.\nif ($json.error) {\n  const msg = typeof $json.error === 'string' ? $json.error : ($json.error.message || JSON.stringify($json.error));\n  // n8n wraps the upstream body as \"400 - {json}\"; pull out just the message\n  // so the log line is readable instead of a mashed JSON blob.\n  const m = String(msg).match(/\"message\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"/);\n  verdict = { verdict: 'review', confidence: 0, defects: [], note: 'gemini call failed: ' + (m ? m[1] : String(msg)) };\n} else {\n  try {\n    verdict = JSON.parse($json.candidates[0].content.parts[0].text);\n  } catch (e) {}\n}\nif (!Array.isArray(verdict.defects)) verdict.defects = verdict.defects ? [String(verdict.defects)] : [];\nif (typeof verdict.verdict !== 'string') verdict.verdict = 'review';\nif (!['pass','review','fail'].includes(verdict.verdict)) verdict.verdict = 'review';\n\n// Everything below is interpolated into a shell command by the move nodes, and\n// the model controls part of it (defects/note). Strip shell metacharacters and\n// newlines so a reply like '\"; rm -rf /data; #' cannot execute. Also caps the\n// length so one rambling note cannot blow out the command line.\nconst shellSafe = (s) => String(s == null ? '' : s)\n  .replace(/[\\r\\n\\t]+/g, ' ')\n  .replace(/[\"'`$\\\\;&|<>]/g, '')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, 200) || 'no detail';\n\nconst detail = verdict.defects.length ? verdict.defects.join('; ') : (verdict.note || '');\nreturn { json: {\n  ...clip,\n  sheet_b64: undefined,\n  ...verdict,\n  safe_reason: shellSafe(verdict.verdict + ': ' + detail),\n} };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "parse-stock",
+      "name": "Parse verdict (stock)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.verdict }}",
+              "rightValue": "pass",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ifpass-stock",
+      "name": "Passed? (stock)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        920,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=PIPE_DATA=/data/stock sh /scripts/move.sh \"{{ $json.path }}\" approved \"gemini pass conf={{ $json.confidence }}\"",
+        "executeOnce": false
+      },
+      "id": "app-stock",
+      "name": "Approve (stock)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.verdict }}",
+              "rightValue": "review",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ifreview-stock",
+      "name": "Needs review? (stock)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=PIPE_DATA=/data/stock sh /scripts/move.sh \"{{ $json.path }}\" review \"{{ $json.safe_reason }}\""
+      },
+      "id": "rev-stock",
+      "name": "Send to review (stock)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        540
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "command": "=PIPE_DATA=/data/stock sh /scripts/move.sh \"{{ $json.path }}\" rejected \"{{ $json.safe_reason }}\"",
+        "executeOnce": false
+      },
+      "id": "rej2-stock",
+      "name": "Reject (model) (stock)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        720
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\n// Both runners read the SAME rubric + context pack from /scripts so the n8n\n// chain and pipeline_qc.py cannot drift apart. context/ is NOT mounted into\n// the container, which is why the doctrine + brand docs are shipped as\n// context_pack.txt under scripts/ instead.\nconst pack   = fs.existsSync('/scripts/context_pack.txt')\n  ? fs.readFileSync('/scripts/context_pack.txt','utf8') + '\\n\\n' : '';\nconst rubric = pack + fs.readFileSync('/scripts/rubric_reel.txt','utf8');\n// No reference at the reel stage: a reel is built from an already-approved\n// stock clip, so identity was checked upstream. Set reference_image in\n// qc_config.json if you ever render reels from unapproved footage.\nconst reference_b64 = '';\nreturn [{ json: { rubric, reference_b64 } }];"
+      },
+      "id": "rub-reel",
+      "name": "Load rubric (reel)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "command": "PIPE_DATA=/data/reels PIPE_STAGE=reel python3 /scripts/scan.py --stage reel",
+        "executeOnce": true
+      },
+      "id": "scan-reel",
+      "name": "ffmpeg pre-QC (reel)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.stdout || '[]';\nlet clips = [];\ntry { clips = JSON.parse(raw); } catch (e) { throw new Error('scan.py did not return JSON: ' + raw.slice(0,300)); }\nif (!clips.length) return [];\n\n// Everything below is interpolated into a shell command by the move nodes, and\n// the model controls part of it (defects/note). Strip shell metacharacters and\n// newlines so a reply like '\"; rm -rf /data; #' cannot execute. Also caps the\n// length so one rambling note cannot blow out the command line.\nconst shellSafe = (s) => String(s == null ? '' : s)\n  .replace(/[\\r\\n\\t]+/g, ' ')\n  .replace(/[\"'`$\\\\;&|<>]/g, '')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, 200) || 'no detail';\n\nreturn clips.map(c => ({ json: {\n  ...c,\n  safe_reason: shellSafe((c.hard_fail_reasons || []).join('; ')),\n} }));"
+      },
+      "id": "split-reel",
+      "name": "One item per clip (reel)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hard_fail }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ifhard-reel",
+      "name": "Hard fail? (reel)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=PIPE_DATA=/data/reels sh /scripts/move.sh \"{{ $json.path }}\" rejected \"{{ $json.safe_reason }}\"",
+        "executeOnce": false
+      },
+      "id": "rej1-reel",
+      "name": "Reject (objective) (reel)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        640,
+        1060
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [ { parts: [{ text: $('Load rubric (reel)').first().json.rubric }].concat($('Load rubric (reel)').first().json.reference_b64 ? [{ text: 'REFERENCE IMAGE (the persona):' },{ inline_data: { mime_type: 'image/jpeg', data: $('Load rubric (reel)').first().json.reference_b64 } }] : []).concat([{ text: 'CONTACT SHEET (the clip under review):' },{ inline_data: { mime_type: 'image/jpeg', data: $json.sheet_b64 } }]) } ], generationConfig: { temperature: 0, responseMimeType: 'application/json' } }) }}",
+        "options": {
+          "timeout": 120000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 5000
+            }
+          }
+        }
+      },
+      "id": "gem-reel",
+      "name": "Gemini QC (reel)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        1340
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 10000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Runs once per item. Must stay in runOnceForEachItem mode: this body uses\n// $json and $('Hard fail? (reel)').item, which are single-item constructs. In the\n// default run-once-for-all-items mode it silently collapsed N Gemini replies\n// into 1 and dropped every clip after the first.\nconst clip = $('Hard fail? (reel)').item.json;\nlet verdict = { verdict: 'review', confidence: 0, defects: [], note: 'unparseable model reply' };\n\n// The Gemini node continues on error so one bad clip cannot strand the batch.\n// A failed call arrives here as an error item; route it to review rather than\n// silently rejecting a clip nobody actually looked at.\nif ($json.error) {\n  const msg = typeof $json.error === 'string' ? $json.error : ($json.error.message || JSON.stringify($json.error));\n  // n8n wraps the upstream body as \"400 - {json}\"; pull out just the message\n  // so the log line is readable instead of a mashed JSON blob.\n  const m = String(msg).match(/\"message\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"/);\n  verdict = { verdict: 'review', confidence: 0, defects: [], note: 'gemini call failed: ' + (m ? m[1] : String(msg)) };\n} else {\n  try {\n    verdict = JSON.parse($json.candidates[0].content.parts[0].text);\n  } catch (e) {}\n}\nif (!Array.isArray(verdict.defects)) verdict.defects = verdict.defects ? [String(verdict.defects)] : [];\nif (typeof verdict.verdict !== 'string') verdict.verdict = 'review';\nif (!['pass','review','fail'].includes(verdict.verdict)) verdict.verdict = 'review';\n\n// Everything below is interpolated into a shell command by the move nodes, and\n// the model controls part of it (defects/note). Strip shell metacharacters and\n// newlines so a reply like '\"; rm -rf /data; #' cannot execute. Also caps the\n// length so one rambling note cannot blow out the command line.\nconst shellSafe = (s) => String(s == null ? '' : s)\n  .replace(/[\\r\\n\\t]+/g, ' ')\n  .replace(/[\"'`$\\\\;&|<>]/g, '')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, 200) || 'no detail';\n\nconst detail = verdict.defects.length ? verdict.defects.join('; ') : (verdict.note || '');\nreturn { json: {\n  ...clip,\n  sheet_b64: undefined,\n  ...verdict,\n  safe_reason: shellSafe(verdict.verdict + ': ' + detail),\n} };",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "parse-reel",
+      "name": "Parse verdict (reel)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        1320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.verdict }}",
+              "rightValue": "pass",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ifpass-reel",
+      "name": "Passed? (reel)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        920,
+        1320
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=PIPE_DATA=/data/reels sh /scripts/move.sh \"{{ $json.path }}\" approved \"gemini pass conf={{ $json.confidence }}\"",
+        "executeOnce": false
+      },
+      "id": "app-reel",
+      "name": "Approve (reel)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        1220
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.verdict }}",
+              "rightValue": "review",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "ifreview-reel",
+      "name": "Needs review? (reel)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        1520
+      ]
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=PIPE_DATA=/data/reels sh /scripts/move.sh \"{{ $json.path }}\" review \"{{ $json.safe_reason }}\""
+      },
+      "id": "rev-reel",
+      "name": "Send to review (reel)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        1440
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "command": "=PIPE_DATA=/data/reels sh /scripts/move.sh \"{{ $json.path }}\" rejected \"{{ $json.safe_reason }}\"",
+        "executeOnce": false
+      },
+      "id": "rej2-reel",
+      "name": "Reject (model) (reel)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        1620
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "ffmpeg pre-QC (stock)": {
+      "main": [
+        [
+          {
+            "node": "One item per clip (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per clip (stock)": {
+      "main": [
+        [
+          {
+            "node": "Hard fail? (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hard fail? (stock)": {
+      "main": [
+        [
+          {
+            "node": "Reject (objective) (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gemini QC (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini QC (stock)": {
+      "main": [
+        [
+          {
+            "node": "Parse verdict (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse verdict (stock)": {
+      "main": [
+        [
+          {
+            "node": "Passed? (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passed? (stock)": {
+      "main": [
+        [
+          {
+            "node": "Approve (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Needs review? (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load rubric (stock)": {
+      "main": [
+        [
+          {
+            "node": "ffmpeg pre-QC (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs review? (stock)": {
+      "main": [
+        [
+          {
+            "node": "Send to review (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject (model) (stock)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every hour": {
+      "main": [
+        [
+          {
+            "node": "Load rubric (stock)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Load rubric (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "Load rubric (stock)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Load rubric (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ffmpeg pre-QC (reel)": {
+      "main": [
+        [
+          {
+            "node": "One item per clip (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per clip (reel)": {
+      "main": [
+        [
+          {
+            "node": "Hard fail? (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hard fail? (reel)": {
+      "main": [
+        [
+          {
+            "node": "Reject (objective) (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gemini QC (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini QC (reel)": {
+      "main": [
+        [
+          {
+            "node": "Parse verdict (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse verdict (reel)": {
+      "main": [
+        [
+          {
+            "node": "Passed? (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passed? (reel)": {
+      "main": [
+        [
+          {
+            "node": "Approve (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Needs review? (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load rubric (reel)": {
+      "main": [
+        [
+          {
+            "node": "ffmpeg pre-QC (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs review? (reel)": {
+      "main": [
+        [
+          {
+            "node": "Send to review (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject (model) (reel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,33 @@
+# secrets — never commit
+.env
+
+# volume snapshots
+n8n_data_backup_*.tgz
+
+# macOS
+.DS_Store
+
+# clip data — gigabytes of mp4s. Covers the legacy single-stage tree AND the
+# two-stage trees added 30 Jul. Only structure and verdict logs are tracked.
+data/inbox/*
+data/approved/*
+data/rejected/*
+data/review/*
+data/work/*
+data/stock/*/*
+data/reels/*/*
+
+# keep directory structure so a fresh clone has somewhere to put clips
+!data/**/.gitkeep
+
+# the verdict logs ARE worth keeping — they are the record of what the gate
+# decided and when, and diffing them across model changes is how you tell
+# whether a rubric edit helped
+!data/**/_log.tsv
+
+__pycache__/
+*.pyc
+
+# context pack is account-specific; the format is documented in context/README.md
+context/*
+!context/README.md

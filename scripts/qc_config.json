@@ -1,0 +1,84 @@
+{
+  "_comment": "Shared by pipeline_qc.py and workflow_qc.json. Both runners read THIS file so their gates cannot drift apart. Paths are relative to the scripts/ directory (which is /scripts inside the container).",
+
+  "model": "gemini-3.6-flash",
+  "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+
+  "_throttle_comment": "BILLING ENABLED 30 Jul, so the 20/day free-tier wall is gone and this is 30 rpm. History: the free tier capped at 20 requests and a fixed 2s/4s retry made it worse by firing 3 requests in 6s. 429s now honour the retry delay the API returns, and two unrecoverable 429s abort the run rather than grinding.",
+  "rpm": 30,
+  "max_tries": 3,
+  "_timeout_comment": "Raised from 120 when the payload went from a 60KB contact sheet to a 9-30MB mp4 - the request now spends real time uploading before the model starts thinking, and a timeout files a perfectly good clip into review/.",
+  "timeout_seconds": 300,
+
+  "settle_seconds": 20,
+  "work_keep_days": 14,
+  "scene_threshold": 0.4,
+
+  "_sheet_comment": "Geometry of the contact sheet. Since 30 Jul the sheet is NO LONGER what the model sees by default (see 'media' below) - it is written to work/ for human spot-checking and kept as the over-the-inline-limit fallback. Must stay identical across both runners or the fallback and the n8n path see different evidence. 8 frames, 4x2, 300px wide per tile.",
+  "sheet": { "frames": 8, "tile": "4x2", "scale_width": 300 },
+
+  "_media_comment": "What Gemini actually receives. 'video' sends the whole mp4 inline; the 8-frame sheet cost about the same in tokens (~1500-2000 vs ~2100 for 7s) while discarding nine-tenths of the footage, and defects BETWEEN sampled frames - V21_frozenpond's vanishing dog - were structurally invisible. Set mode to 'sheet' to go back to frames. Any key here can be overridden per stage with a 'media' block inside stages.<stage>, e.g. a lower fps for 45s reels.",
+  "media": {
+    "mode": "video",
+
+    "_media_resolution_comment": "default | low | medium | high, or a literal MEDIA_RESOLUTION_* enum. 'default' omits the field and lets the API choose (~300 tok/s of video). 'low' is ~100 tok/s - cheaper than the contact sheet it replaced.",
+    "media_resolution": "default",
+
+    "_fps_comment": "Frames per second Gemini samples from the video. THE API DEFAULT IS 1 fps, which on a 7s clip is 7 frames - no better than the 8-frame sheet, and the whole point of this change would be lost. 4 fps gives ~28 frames of a 7s clip at ~4x the video token cost (still cents). Set null to use the API default.",
+    "fps": 4,
+
+    "_fallback_comment": "What to do when a clip is too big to inline. 'sheet' falls back to the contact sheet; anything else routes the clip to review/ untouched rather than silently grading it on less evidence.",
+    "fallback": "sheet",
+
+    "_inline_max_comment": "Inline request cap, 100MB as of Jan 2026. Compared against the base64-encoded size (4/3 of the file), because that is what actually goes on the wire. Stock clips are 9-30MB so nothing hits this today; a 30-45s reel could.",
+    "inline_max_bytes": 104857600
+  },
+
+  "context_pack": "../context/context_pack.txt",
+
+  "_retry_comment": "The re-roll loop. Generation CANNOT be scripted - there is no first-party generation API key on this plan, so it only works through the MCP inside an agent session. retry.py therefore does the bookkeeping and enforces the budget; the agent does the two MCP calls in the middle. Splitting it this way means the spend cap is enforced by code, not by an agent remembering it.",
+  "retry": {
+    "_max_attempts_comment": "Re-rolls per clip before it is parked and surfaced. Set 30 Jul. The spec's warning is the reason there is a cap at all: 'retrying blind burns credits'.",
+    "max_attempts": 2,
+
+    "_job_map_comment": "Maps clip name -> the generation job it came from, so a re-roll can start from the ORIGINAL prompt rather than an invented one. Relative to the project root.",
+    "job_map": "../data/JOBS.md",
+
+    "state_file": "work/_retry_state.json",
+
+    "_classify_comment": "A reject reason is only worth re-rolling if a new seed could plausibly fix it. An artifact (a floating object, melted hand) is random and re-rolls out; 'wrong person' or 'face never visible' is the prompt or the character still, and re-rolling the same prompt reproduces it. These are HEURISTICS on the model's free text - retry.py flags its guess and the agent makes the final call.",
+    "artifact_patterns": ["object instability", "anatomy", "melt", "floating",
+                          "attached to nothing", "leads to nothing", "vanish",
+                          "morph", "warp", "jitter", "garbled", "instability",
+                          "disconnected", "unattached", "hard cut"],
+    "structural_patterns": ["wrong person", "identity drift", "face never",
+                            "face not visible", "face hidden", "face is",
+                            "framing",
+                            "side profile", "obscured", "reveal-heavy"]
+  },
+
+  "stages": {
+    "stock": {
+      "_comment": "Raw generated clips, pre-caption. Graded on defects and realism only - it has no captions yet, so craft criteria like hook and on-screen text cannot apply.",
+      "data_root": "data/stock",
+      "rubric": "rubric_stock.txt",
+      "duration_min": 5.0,
+      "duration_max": 9.0,
+      "min_aspect": 1.6,
+      "require_silent": true,
+      "_reference_comment": "Sent as a FIRST image before the contact sheet so the model can judge 'is this even the right person'. Without it, a clip that is internally consistent but the wrong woman (V21_frozenpond) passes.",
+      "reference_image": "reference.jpg"
+    },
+    "reel": {
+      "_comment": "Finished 1080x1920 text reels. Full craft rubric applies. Duration widened to 45s so the 20-45s long-form posts the style guide calls for are not rejected by the objective gate before a model sees them.",
+      "data_root": "data/reels",
+      "rubric": "rubric_reel.txt",
+      "duration_min": 5.0,
+      "duration_max": 45.0,
+      "min_aspect": 1.6,
+      "require_silent": true,
+      "_reference_note": "null by default: a reel is built from an already-approved stock clip, so identity was checked upstream. Set to reference.jpg if you ever render reels from unapproved footage.",
+      "reference_image": null
+    }
+  }
+}

@@ -1,0 +1,37 @@
+services:
+  n8n:
+    build: .
+    container_name: videoqc-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=America/Los_Angeles
+      - N8N_SECURE_COOKIE=false
+      - NODE_FUNCTION_ALLOW_BUILTIN=*
+      # n8n 2.x disables Execute Command by default (nodes.config.js ships
+      # exclude = [executeCommand, localFileTrigger]); without this override
+      # every action node in this workflow fails "Unrecognized node type".
+      # Overriding replaces the whole list, so localFileTrigger is restated.
+      - 'NODES_EXCLUDE=["n8n-nodes-base.localFileTrigger"]'
+      # Gemini node reads the key via {{ $env.GEMINI_API_KEY }}; without this
+      # n8n blocks $env in expressions and the node 401s.
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      # A clip must sit untouched this long before scan.py trusts it is fully
+      # written. Guards against QC'ing a half-finished download.
+      - PIPE_SETTLE_SECONDS=20
+      # Contact sheets in data/work/ are pruned after this many days.
+      - PIPE_WORK_KEEP_DAYS=14
+      # put your key in .env next to this file
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./data:/data
+      - ./scripts:/scripts
+volumes:
+  # External on purpose: this is the volume the user's existing n8n instance
+  # already wrote its owner account into. Letting compose create its own
+  # project-prefixed volume would silently strand that account behind a fresh
+  # setup screen.
+  n8n_data:
+    external: true
